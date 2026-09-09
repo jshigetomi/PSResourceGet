@@ -11,33 +11,22 @@ Import-Module $modPath -Force
 Describe 'PSUserContentPath/PSContentPath - End-to-End Install Location' -Tags 'CI' {
     BeforeAll {
         $script:originalPSModulePath = $env:PSModulePath
-        $script:actualConfigPath = Join-Path $env:LOCALAPPDATA "PowerShell\powershell.config.json"
-        $script:configBackup = $null
-        
-        # Detect if Get-PSContentPath cmdlet is available (requires PSContentPath experimental feature)
-        $script:getPSContentPathAvailable = $false
-        $script:isPSContentPathEnabled = $false
-        $script:sessionContentPath = $null
-        try {
-            # Check if Get-PSContentPath cmdlet exists
-            $null = Get-Command Get-PSContentPath -ErrorAction Stop
-            $script:getPSContentPathAvailable = $true
-            
-            # Get the actual session path
-            $script:sessionContentPath = Get-PSContentPath
-            $documentsPath = [Environment]::GetFolderPath('MyDocuments')
-            $documentsPS = Join-Path $documentsPath "PowerShell"
-            
-            # If Get-PSContentPath returns something other than Documents, the feature is enabled
-            $script:isPSContentPathEnabled = $script:sessionContentPath -ne $documentsPS
-        } catch {
-            # Get-PSContentPath not available (feature disabled)
+        $psUserContentPathVariable = Get-Variable -Name PSUserContentPath -ErrorAction SilentlyContinue
+        $script:psUserContentPathAvailable = $null -ne $psUserContentPathVariable `
+            -and $psUserContentPathVariable.Value -is [string] `
+            -and -not [string]::IsNullOrWhiteSpace($psUserContentPathVariable.Value)
+        $script:sessionContentPath = if ($script:psUserContentPathAvailable) {
+            $psUserContentPathVariable.Value
+        } else {
+            $null
         }
-
-        # Backup existing config if it exists
-        if (Test-Path $script:actualConfigPath) {
-            $script:configBackup = Get-Content $script:actualConfigPath -Raw
+        $script:legacyContentPath = if (Get-IsWindows) {
+            Split-Path -Path (Get-CurrentUserModulesPath) -Parent
+        } else {
+            Join-Path -Path $env:HOME -ChildPath '.local/share/powershell'
         }
+        $script:isCustomContentPath = $script:psUserContentPathAvailable `
+            -and $script:sessionContentPath -ne $script:legacyContentPath
 
         $localRepo = "psgettestlocal"
         $testModuleName = "PSContentPathTestModule"
@@ -51,48 +40,44 @@ Describe 'PSUserContentPath/PSContentPath - End-to-End Install Location' -Tags '
     AfterEach {
         # Restore PSModulePath
         $env:PSModulePath = $script:originalPSModulePath
-        # Clean up installed test modules
-        Uninstall-PSResource $testModuleName -Version "*" -SkipDependencyCheck -ErrorAction SilentlyContinue
+        # Clean up installed test modules from every scope exercised by the tests
+        Uninstall-PSResource $testModuleName -Version "*" -Scope CurrentUser -SkipDependencyCheck -ErrorAction SilentlyContinue
+        if ((Get-IsWindows) -and (Test-IsAdmin)) {
+            Uninstall-PSResource $testModuleName -Version "*" -Scope AllUsers -SkipDependencyCheck -ErrorAction SilentlyContinue
+        }
         # Clear testing hooks
         [Microsoft.PowerShell.PSResourceGet.UtilClasses.InternalHooks]::ClearPSContentPathHooks()
     }
 
     AfterAll {
-        # Restore original config
-        if ($null -ne $script:configBackup) {
-            Set-Content -Path $script:actualConfigPath -Value $script:configBackup -Force
-        }
         Get-RevertPSResourceRepositoryFile
     }
 
-    Context "PSResourceGet behavior on PS 7.7+" {
-        It "Should use Get-PSContentPath when available, Legacy when not" {
+    Context 'PSResourceGet user content path selection' {
+        It 'Should use $PSUserContentPath when available, Legacy when not' {
             Install-PSResource -Name $testModuleName -Repository $localRepo -Scope CurrentUser -TrustRepository
             
             $pathSource = [Microsoft.PowerShell.PSResourceGet.UtilClasses.InternalHooks]::GetTestHook("LastUserContentPathSource")
             $pathUsed = [Microsoft.PowerShell.PSResourceGet.UtilClasses.InternalHooks]::GetTestHook("LastUserContentPath")
             
-            if ($script:getPSContentPathAvailable) {
-                # When Get-PSContentPath cmdlet exists, PSResourceGet should use it
-                $pathSource | Should -Be "Get-PSContentPath"
+            if ($script:psUserContentPathAvailable) {
+                $pathSource | Should -Be '$PSUserContentPath'
                 $pathUsed | Should -Be $script:sessionContentPath
             } else {
-                # When Get-PSContentPath cmdlet doesn't exist, PSResourceGet should use legacy path
                 $pathSource | Should -Be "Legacy"
-                $documentsPath = [Environment]::GetFolderPath('MyDocuments')
-                $pathUsed | Should -BeLike "*$documentsPath*PowerShell"
+                $pathUsed | Should -Be $script:legacyContentPath
             }
             
             # Module should be installed
-            $res = Get-InstalledPSResource -Name $testModuleName
+            $res = Get-InstalledPSResource -Name $testModuleName -Scope CurrentUser
             $res.Name | Should -Be $testModuleName
         }
     }
 
-    Context "When PSContentPath feature is enabled in session (PS >= 7.7)" {
-        It "Should install to custom LocalAppData path (not Documents)" {
-            if (-not $script:getPSContentPathAvailable -or -not $script:isPSContentPathEnabled) {
-                Set-ItResult -Skipped -Because "PSContentPath feature not enabled in this session"
+    Context 'When a custom $PSUserContentPath is configured' {
+        It "Should install to the custom user content path" {
+            if (-not $script:isCustomContentPath) {
+                Set-ItResult -Skipped -Because "A custom PSUserContentPath is not configured in this session"
                 return
             }
             
@@ -101,71 +86,53 @@ Describe 'PSUserContentPath/PSContentPath - End-to-End Install Location' -Tags '
             $pathSource = [Microsoft.PowerShell.PSResourceGet.UtilClasses.InternalHooks]::GetTestHook("LastUserContentPathSource")
             $pathUsed = [Microsoft.PowerShell.PSResourceGet.UtilClasses.InternalHooks]::GetTestHook("LastUserContentPath")
             
-            # PSResourceGet should call Get-PSContentPath
-            $pathSource | Should -Be "Get-PSContentPath"
-            
-            # Path should NOT be Documents (feature enabled means custom path)
-            $documentsPath = [Environment]::GetFolderPath('MyDocuments')
-            $pathUsed | Should -Not -BeLike "*$documentsPath*"
+            $pathSource | Should -Be '$PSUserContentPath'
+            $pathUsed | Should -Be $script:sessionContentPath
             
             # Module should be installed in custom path
-            $res = Get-InstalledPSResource -Name $testModuleName
+            $res = Get-InstalledPSResource -Name $testModuleName -Scope CurrentUser
+            $expectedModulesPath = Join-Path $script:sessionContentPath 'Modules'
+            $expectedModulePath = Join-Path $expectedModulesPath $testModuleName
+            Test-Path $expectedModulePath | Should -BeTrue
             $res.Name | Should -Be $testModuleName
-            $res.InstalledLocation | Should -Not -BeLike "*$documentsPath*"
+            $res.InstalledLocation | Should -Be $expectedModulesPath
         }
     }
 
-    Context "PSResourceGet correctly delegates path resolution (PS >= 7.7)" {
-        It "Should always defer to Get-PSContentPath when cmdlet is available" {
-            if (-not $script:getPSContentPathAvailable) {
-                Set-ItResult -Skipped -Because "Get-PSContentPath cmdlet not available"
+    Context 'PSResourceGet delegates user content path resolution' {
+        It 'Should use $PSUserContentPath when the variable is available' {
+            if (-not $script:psUserContentPathAvailable) {
+                Set-ItResult -Skipped -Because "PSUserContentPath is not available"
                 return
             }
             
-            $beforePath = Get-PSContentPath
+            $beforePath = $PSUserContentPath
             
             Install-PSResource -Name $testModuleName -Repository $localRepo -Scope CurrentUser -TrustRepository
             
             $pathSource = [Microsoft.PowerShell.PSResourceGet.UtilClasses.InternalHooks]::GetTestHook("LastUserContentPathSource")
             $pathUsed = [Microsoft.PowerShell.PSResourceGet.UtilClasses.InternalHooks]::GetTestHook("LastUserContentPath")
             
-            # PSResourceGet should call Get-PSContentPath
-            $pathSource | Should -Be "Get-PSContentPath"
+            $pathSource | Should -Be '$PSUserContentPath'
             
-            # Path should match what Get-PSContentPath returns
+            # Path should match the engine-provided session value
             $pathUsed | Should -Be $beforePath
             
             # Module should be installed
-            $res = Get-InstalledPSResource -Name $testModuleName
+            $res = Get-InstalledPSResource -Name $testModuleName -Scope CurrentUser
             $res.Name | Should -Be $testModuleName
         }
     }
 
     Context "AllUsers scope should not be affected by PSContentPath/PSUserContentPath" {
-        BeforeAll {
-            if (!$IsWindows -or !(Test-IsAdmin)) { return }
-        }
-        It "Should install to Program Files (AllUsers not affected by PSContentPath)" {
-            if (!$IsWindows -or !(Test-IsAdmin)) {
-                Set-ItResult -Skipped -Because "Test requires Windows and Administrator privileges"
-                return
-            }
+        It "Should install to the shared PowerShell modules path" -Skip:(!((Get-IsWindows) -and (Test-IsAdmin))) {
             Install-PSResource -Name $testModuleName -Repository $localRepo -Scope AllUsers -TrustRepository
-            $programFilesPath = [Environment]::GetFolderPath('ProgramFiles')
-            $expectedPath = Join-Path $programFilesPath "PowerShell\Modules\$testModuleName"
-            Test-Path $expectedPath | Should -BeTrue
-            $res = Get-InstalledPSResource -Name $testModuleName
+            $expectedModulesPath = Get-AllUsersModulesPath
+            $expectedModulePath = Join-Path $expectedModulesPath $testModuleName
+            Test-Path $expectedModulePath | Should -BeTrue
+            $res = Get-InstalledPSResource -Name $testModuleName -Scope AllUsers
             $res.Name | Should -Be $testModuleName
-            $res.InstalledLocation | Should -BeLike "*Program Files*PowerShell*Modules*"
+            $res.InstalledLocation | Should -Be $expectedModulesPath
         }
     }
-}
-
-function Test-IsAdmin {
-    if ($IsWindows) {
-        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    }
-    return $false
 }
