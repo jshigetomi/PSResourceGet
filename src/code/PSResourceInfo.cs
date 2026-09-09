@@ -1592,7 +1592,7 @@ namespace Microsoft.PowerShell.PSResourceGet.UtilClasses
 
         private static string ConcatenateVersionWithPrerelease(string version, string prerelease)
         {
-            return Utils.GetNormalizedVersionString(version, prerelease);
+            return Utils.GetThreeDigitNormalizedVersionString(version, prerelease);
         }
 
         #endregion
@@ -1989,9 +1989,8 @@ namespace Microsoft.PowerShell.PSResourceGet.UtilClasses
 
         private PSObject ConvertToCustomObject()
         {
-            // 1.0.0-alpha1
-            // 1.0.0.0
-            string NormalizedVersion = IsPrerelease ? ConcatenateVersionWithPrerelease(Version.ToString(), Prerelease) : Version.ToString();
+            string version = Utils.GetFullVersionString(Version.ToString(), Prerelease);
+            string NormalizedVersion = Utils.GetThreeDigitNormalizedVersionString(Version.ToString(), Prerelease); 
 
             var additionalMetadata = new PSObject();
 
@@ -2021,7 +2020,7 @@ namespace Microsoft.PowerShell.PSResourceGet.UtilClasses
 
             var psObject = new PSObject();
             psObject.Properties.Add(new PSNoteProperty(nameof(Name), Name));
-            psObject.Properties.Add(new PSNoteProperty(nameof(Version), NormalizedVersion));
+            psObject.Properties.Add(new PSNoteProperty(nameof(Version), version));
             psObject.Properties.Add(new PSNoteProperty(nameof(Type), Type));
             psObject.Properties.Add(new PSNoteProperty(nameof(Description), Description));
             psObject.Properties.Add(new PSNoteProperty(nameof(Author), Author));
