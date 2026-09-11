@@ -773,7 +773,7 @@ namespace Microsoft.PowerShell.PSResourceGet.UtilClasses
                         }
 
                         // Fallback: use the "any" / no-TFM group, or the first group
-                        if (selectedGroupElement == null)
+                        if (selectedGroupElement == null && groupMap.Count > 0)
                         {
                             var fallback = groupMap.FirstOrDefault(g =>
                                 g.framework == null ||
@@ -786,6 +786,7 @@ namespace Microsoft.PowerShell.PSResourceGet.UtilClasses
 
                         // Parse dependencies from the selected group
                         if (selectedGroupElement.HasValue &&
+                            selectedGroupElement.Value.ValueKind == JsonValueKind.Object &&
                             selectedGroupElement.Value.TryGetProperty("dependencies", out JsonElement dependenciesElement) &&
                             dependenciesElement.ValueKind == JsonValueKind.Array)
                         {
@@ -2174,6 +2175,19 @@ namespace Microsoft.PowerShell.PSResourceGet.UtilClasses
             }
 
             throw new PSInvalidOperationException(errorMsg);
+        }
+
+        public static PSObject ConvertFromJson(string json, PSRepositoryInfo repository)
+        {
+            using (JsonDocument pkgJson = JsonDocument.Parse(json))
+            {
+                if (PSResourceInfo.TryConvertFromJson(pkgJson, out PSResourceInfo psGetInfo, repository, out string errorMsg))
+                {
+                    return PSObject.AsPSObject(psGetInfo);
+                }
+
+                throw new PSInvalidOperationException(errorMsg);
+            }
         }
 
         public static void WritePSGetResourceInfo(
